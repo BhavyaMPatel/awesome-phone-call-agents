@@ -3,12 +3,13 @@ import prisma from '../prismaClient';
 import BackfillOrchestrator from '../services/BackfillOrchestrator';
 import CalleService from '../services/CalleService';
 import { ensureSeedData } from '../seed';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 const calle = new CalleService();
 const orchestrator = new BackfillOrchestrator(calle);
 
-// GET endpoint for dashboard - list all appointments
+// GET endpoint for dashboard - list all appointments (read-only, auth required)
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const appts = await prisma.appointment.findMany({ include: { patient: true }, orderBy: { scheduled_at: 'asc' } });
@@ -19,7 +20,7 @@ router.get('/', async (_req: Request, res: Response) => {
   }
 });
 
-// GET endpoint for waitlist
+// GET endpoint for waitlist (read-only, auth required)
 router.get('/waitlist', async (_req: Request, res: Response) => {
   try {
     const waitlist = await prisma.waitlist.findMany({ include: { patient: true }, orderBy: [{ priority_score: 'desc' }, { created_at: 'asc' }] });
@@ -40,7 +41,8 @@ router.get('/list', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/reset-demo', async (_req: Request, res: Response) => {
+// POST endpoint for resetting demo data (requires auth)
+router.post('/reset-demo', requireAuth, async (_req: Request, res: Response) => {
   try {
     await prisma.callLog.deleteMany();
     await prisma.waitlist.deleteMany();
@@ -54,7 +56,8 @@ router.post('/reset-demo', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/cancel', async (req: Request, res: Response) => {
+// POST endpoint for cancelling appointments (requires auth)
+router.post('/cancel', requireAuth, async (req: Request, res: Response) => {
   try {
     const { appointment_id, action, reason } = req.body as {
       appointment_id?: string;

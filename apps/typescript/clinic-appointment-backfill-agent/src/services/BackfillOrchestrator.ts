@@ -1,5 +1,7 @@
 import prisma from '../prismaClient';
 import CalleService from './CalleService';
+import { maskPhoneNumber } from '../utils/piiMasking';
+import { validateE164OrThrow } from '../utils/phoneValidation';
 
 export default class BackfillOrchestrator {
   calle: CalleService;
@@ -24,7 +26,7 @@ export default class BackfillOrchestrator {
     let callsMade = 0;
     for (const entry of waitlist) {
       callsMade++;
-      console.log(`\n📞 Call #${callsMade}/${waitlist.length}: Processing patient ${entry.patient_id}...`);
+      console.log(`\n📞 Call #${callsMade}/${waitlist.length}: Processing patient...`);
       
       // mark contacted
       await prisma.waitlist.update({ where: { id: entry.id }, data: { status: 'CONTACTED' } });
@@ -36,10 +38,21 @@ export default class BackfillOrchestrator {
         continue;
       }
 
-      const script = `You are an assistant for ${appointment.provider_name}. Call ${patient.first_name} ${patient.last_name} at ${patient.phone_number}. Offer earlier slot on ${appointment.scheduled_at.toISOString()}.`;
+      // SECURITY GATE: Validate patient phone is E.164 before calling
+      let validatedPhone: string;
+      try {
+        validatedPhone = validateE164OrThrow(patient.phone_number, 'Patient phone number');
+      } catch (error: any) {
+        console.error(`   ✗ Invalid phone number: ${error.message}. Skipping patient.`);
+        await prisma.waitlist.update({ where: { id: entry.id }, data: { status: 'DECLINED' } });
+        continue;
+      }
 
-      console.log(`   📱 Calling ${patient.first_name} ${patient.last_name} at ${patient.phone_number}`);
-      const result = await this.calle.placeCallAndWaitForResult(patient.phone_number, script);
+      const script = `You are an assistant for ${appointment.provider_name}. Offer an appointment slot in ${appointment.department} on ${appointment.scheduled_at.toISOString()}. Ask if the patient can make this time. If they confirm, politely thank them and end the call. If they decline or do not answer, end politely.`;
+
+      const maskedPhone = maskPhoneNumber(validatedPhone);
+      console.log(`   📱 Calling patient at ${maskedPhone}`);
+      const result = await this.calle.placeCallAndWaitForResult(validatedPhone, script);
       console.log(`   ✓ Call completed: ${result.response_status} (Accepted: ${result.accepted})`);
 
       // log the call
@@ -55,8 +68,9 @@ export default class BackfillOrchestrator {
       });
       console.log(`   ✓ Call logged to database`);
 
-      if (result.accepted) {
-        console.log(`   ✅ ACCEPTED! Assigning appointment to ${patient.first_name}...`);
+      // SAFETY BOUNDARY: Only assign on clear ACCEPTED response, not on timeout/no-answer
+      if (result.accepted && result.response_status === 'ACCEPTED') {
+        console.log(`   ✅ ACCEPTED! Assigning appointment...`);
         
         // Assign freed appointment to this patient
         await prisma.appointment.update({ where: { id: appointmentId }, data: { patient_id: patient.id, status: 'BOOKED' } });
@@ -66,14 +80,20 @@ export default class BackfillOrchestrator {
 
         await prisma.waitlist.update({ where: { id: entry.id }, data: { status: 'ACCEPTED' } });
 
-        console.log(`✅ BACKFILL COMPLETE: Patient ${patient.id} assigned appointment ${appointmentId}`);
+        console.log(`✅ BACKFILL COMPLETE: Appointment ${appointmentId} assigned`);
         console.log(`   Contacted ${callsMade} patient(s) before finding match\n`);
         
         break;  // Exit the loop - appointment is filled
-      } else {
+      } else if (result.response_status === 'DECLINED') {
         console.log(`   ❌ DECLINED - Moving to next patient`);
         await prisma.waitlist.update({ where: { id: entry.id }, data: { status: 'DECLINED' } });
         // Continue to next patient
+      } else {
+        // NO_ANSWER or FAILED: stop processing, don't auto-advance
+        console.log(`   ⚠️  ${result.response_status} (${result.notes || 'no details'})`);
+        console.log(`   ⚠️  STOPPING BACKFILL: No auto-advance on ${result.response_status}`);
+        await prisma.waitlist.update({ where: { id: entry.id }, data: { status: 'CONTACTED' } });
+        break;  // Exit immediately - do not continue to next patient
       }
     }
 

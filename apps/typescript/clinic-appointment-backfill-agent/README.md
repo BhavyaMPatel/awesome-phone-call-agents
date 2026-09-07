@@ -1,6 +1,6 @@
 # Appointment Backfill Operator
 
-Clinic-side appointment recovery via CALL-E: when a patient cancels, automatically calls waiting-list patients in priority order to fill the open slot—with explicit human approval gates, transcript evidence storage, masked phone numbers for HIPAA compliance, and a live operations dashboard.
+Clinic-side appointment recovery via CALL-E: when a patient cancels, automatically calls waiting-list patients in priority order to fill the open slot—with E.164 validation, authentication on all endpoints, transcript evidence storage, masked phone numbers in logs, and a live operations dashboard.
 
 ## Problem & Solution
 
@@ -19,8 +19,12 @@ Open appointment slots cost clinics revenue and hurt patient care access. Manual
 ✅ **Inbound cancellation detection** — mock webhooks or dashboard-triggered cancellations  
 ✅ **Live dashboard** — real-time stats, waitlist queue, appointment schedule, call activity  
 ✅ **Structured call results** — accepts/declines/no-answer with durable evidence  
-✅ **Idempotent calls** — no duplicate calls on retry or webhook replay  
-✅ **HIPAA-ready** — masked phone numbers in UI, full encryption option for database  
+✅ **Live call gates** — requires ALLOW_LIVE_CALLS=true + valid API key before placing real calls  
+✅ **E.164 phone validation** — strict format validation on all patient phone numbers  
+✅ **Authentication required** — Bearer token auth on all API endpoints  
+✅ **Webhook deduplication** — prevents duplicate calls from replayed webhooks  
+✅ **PII masking in logs** — phone numbers and names masked in console output  
+✅ **Call termination boundaries** — stops on timeout/no-answer, no auto-advance to next patient  
 ✅ **Transcript audit trail** — every call stored with direction, status, and structured output  
 ✅ **Reset demo data** — safe local testing with seeded patients and appointments  
 
@@ -87,12 +91,17 @@ Prisma + SQLite
 See [SAFETY.md](SAFETY.md) for detailed compliance notes.
 
 **Key safeguards:**
-- ✅ Phone numbers **masked in UI only** (full numbers in database & CALL-E API)
-- ✅ Explicit **backfill approval** shown on dashboard (not automatic)
+- ✅ **Authentication required** — Bearer token on all API endpoints (set DEMO_MODE=true for local testing)
+- ✅ **Live call gates** — ALLOW_LIVE_CALLS=true AND valid CALLE_API_KEY required for real calls
+- ✅ **E.164 validation** — strict phone number format validation before any call
+- ✅ **PII masking in logs** — phone numbers masked as +1***[last 4], names as initial.lastname
+- ✅ **Phone numbers masked in UI only** (full numbers stored in database & sent to CALL-E API for actual calls)
 - ✅ **Immutable cancellation audit** — once marked CANCELLED, cannot be undone
-- ✅ **Idempotent calls** — duplicate webhook replays don't create duplicate calls
+- ✅ **Webhook deduplication** — replayed webhooks don't create duplicate call logs
 - ✅ **Evidence-first** — all calls logged with transcripts before and after dispatch
 - ✅ **Sequential cascade** — no parallel calling, prevents race-condition double-books
+- ✅ **Call termination boundaries** — stops on timeout/no-answer, no auto-advance to next patient
+- ⚠️ **Not HIPAA-ready** — this app stores patient data in plaintext SQLite and does not implement HIPAA-required encryption, audit logging, or consent management
 
 ## Project Structure
 

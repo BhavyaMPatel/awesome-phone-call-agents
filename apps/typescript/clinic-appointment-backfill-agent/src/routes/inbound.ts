@@ -2,12 +2,14 @@ import { Router, Request, Response } from 'express';
 import prisma from '../prismaClient';
 import BackfillOrchestrator from '../services/BackfillOrchestrator';
 import CalleService from '../services/CalleService';
+import { requireAuth } from '../middleware/auth';
 
 const router = Router();
 const calle = new CalleService();
 const orchestrator = new BackfillOrchestrator(calle);
 
-router.post('/mock', async (req: Request, res: Response) => {
+// POST /mock endpoint for simulating inbound cancellations (requires auth)
+router.post('/mock', requireAuth, async (req: Request, res: Response) => {
   try {
     const { appointment_id, patient_id, action, reason } = req.body as {
       appointment_id?: string;
@@ -89,7 +91,8 @@ router.post('/mock', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/call-completed', async (req: Request, res: Response) => {
+// POST /call-completed endpoint (requires auth)
+router.post('/call-completed', requireAuth, async (req: Request, res: Response) => {
   try {
     const { patient_id, appointment_id, action, reason } = req.body as {
       patient_id?: string;

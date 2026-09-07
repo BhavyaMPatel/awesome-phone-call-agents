@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { isValidE164, validateE164OrThrow, maskPhoneNumber } from '../utils/phoneValidation';
+import { maskPatientName } from '../utils/piiMasking';
+import { isLiveCallsEnabled, validateCalleBaseUrl } from '../utils/liveCallGate';
 
 type OutboundResult = {
   accepted: boolean;
@@ -23,6 +26,13 @@ export default class CalleService {
     this.client = undefined;
     this.apiKey = process.env.CALLE_API_KEY;
     this.baseUrl = process.env.CALLE_BASE_URL || 'https://api.heycall-e.com';
+    
+    // Validate CALLE_BASE_URL on construction
+    try {
+      validateCalleBaseUrl();
+    } catch (error: any) {
+      console.error(`❌ ${error.message}`);
+    }
   }
 
   private getHTTPClient(): any {
@@ -31,9 +41,16 @@ export default class CalleService {
         createAndWait: async (opts: any, params?: any) => {
           if (!this.apiKey) throw new Error('No API key configured');
           
+          // SECURITY GATE 1: Check if live calls are allowed before making actual API call
+          if (!isLiveCallsEnabled()) {
+            throw new Error(
+              'Live calls are disabled. Set ALLOW_LIVE_CALLS=true and CALLE_API_KEY in .env to enable. ' +
+              'Currently running in demo/mock mode only.'
+            );
+          }
+          
           try {
             console.log(`📞 Calling CALL-E API: POST ${this.baseUrl}/v1/calls`);
-            console.log(`   Auth: API key format: ${this.apiKey?.substring(0, 10)}...`);
             
             // Try with Bearer token first
             const headers: any = {
@@ -162,6 +179,14 @@ export default class CalleService {
       return this.client;
     }
 
+    // SECURITY GATE 2: Check if live calls are actually enabled before trying to use real API
+    if (!isLiveCallsEnabled()) {
+      console.log('ℹ️  ALLOW_LIVE_CALLS is disabled; using local mock CALL-E client.');
+      console.log('   To enable live calls, set ALLOW_LIVE_CALLS=true in .env');
+      this.client = this.getMockClient();
+      return this.client;
+    }
+
     try {
       console.log('🔄 Attempting to load CALL-E SDK with API key...');
       
@@ -174,7 +199,7 @@ export default class CalleService {
       }
       
       this.client = new CalleClient({ apiKey: this.apiKey, baseUrl: this.baseUrl });
-      console.log('✓ CALL-E SDK loaded successfully with your real API key');
+      console.log('✓ CALL-E SDK loaded successfully');
       return this.client;
     } catch (error: any) {
       console.warn('⚠ CALL-E SDK import failed, trying HTTP API fallback:', error.message);
@@ -256,13 +281,33 @@ export default class CalleService {
 
   /**
    * Initiate a CALL-E outbound call and poll the call until it terminates.
+   * 
+   * SECURITY & SAFETY GATES:
+   * - Validates phone number is E.164 format
+   * - Checks ALLOW_LIVE_CALLS gate before making actual API calls
+   * - Masks patient phone numbers in logs
+   * - Returns immediately on timeout, no-answer, or ambiguous results (no auto-advance)
+   * 
    * Returns only when the call is no longer in an in-progress state, so the
    * caller gets the agent's actual final structured result instead of a
    * premature "not accepted" guess.
    */
   async placeCallAndWaitForResult(phone: string, task: string, opts: { maxWaitMs?: number; pollIntervalMs?: number } = {}): Promise<OutboundResult> {
+    // SECURITY GATE 3: Validate E.164 phone format before any call attempt
+    try {
+      validateE164OrThrow(phone, 'Destination phone number');
+    } catch (error: any) {
+      console.error(`❌ Call rejected: ${error.message}`);
+      return {
+        accepted: false,
+        response_status: 'FAILED',
+        notes: error.message,
+      };
+    }
+
     const maxWaitMs = opts.maxWaitMs ?? 120_000;
     const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
+    const maskedPhone = maskPhoneNumber(phone);
 
     const client = await this.getClient();
     if (!client) {
@@ -273,6 +318,8 @@ export default class CalleService {
 
     let call: any;
     try {
+      console.log(`📱 Placing outbound call to ${maskedPhone}`);
+      
       // Preferred path: SDK supports `createAndWait` which itself blocks until
       // the call finishes. The orchestrator will wait on this promise.
       if (typeof client.calls?.createAndWait === 'function') {
@@ -285,7 +332,7 @@ export default class CalleService {
               required: ['accepted'],
               properties: { accepted: { type: 'string', enum: ['yes', 'no', 'unknown'] } },
             },
-            metadata: { source: 'OpenSlot AI automated flow', target_phone: phone },
+            metadata: { source: 'Clinic appointment backfill', target_phone_last4: phone.slice(-4) },
           },
           { idempotencyKey: idemKey },
         );
@@ -295,7 +342,7 @@ export default class CalleService {
           {
             task,
             recipients: [{ phones: [phone], region: 'IN', locale: 'en-IN' }],
-            metadata: { source: 'OpenSlot AI automated flow', target_phone: phone },
+            metadata: { source: 'Clinic appointment backfill', target_phone_last4: phone.slice(-4) },
           },
           { idempotencyKey: idemKey },
         );
@@ -305,7 +352,8 @@ export default class CalleService {
         while (true) {
           await new Promise((r) => setTimeout(r, pollIntervalMs));
           if (Date.now() - started > maxWaitMs) {
-            return { accepted: false, response_status: 'NO_ANSWER', notes: 'Timed out waiting for call to complete', calle_call_id: callId };
+            console.log(`⏱️  Call to ${maskedPhone} timed out after ${maxWaitMs}ms - no auto-advance`);
+            return { accepted: false, response_status: 'NO_ANSWER', notes: 'Call timed out; no auto-advance to next patient', calle_call_id: callId };
           }
           const fetched = await client.calls.retrieve?.(callId);
           const status = (fetched?.status || '').toLowerCase();
@@ -334,9 +382,11 @@ export default class CalleService {
       : status === 'failed' ? 'FAILED'
       : 'NO_ANSWER';
 
+    console.log(`✓ Call to ${maskedPhone}: ${response_status} (accepted: ${accepted})`);
+
     return {
       accepted,
-      notes: call?.summary || call?.recipients?.[0]?.summary || 'Outbound CALL-E call completed',
+      notes: call?.summary || call?.recipients?.[0]?.summary || 'Call completed',
       response_status,
       calle_call_id: call?.id,
       raw: call,

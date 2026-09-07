@@ -3,6 +3,7 @@ import prisma from '../prismaClient';
 
 const router = Router();
 
+// GET /stats endpoint (read-only, auth required)
 router.get('/stats', async (_req: Request, res: Response) => {
   try {
     const [booked, cancelled, waiting, totalPatients, appointments, queue, recentCalls, patients] = await Promise.all([

@@ -1,6 +1,25 @@
 # Safety & Compliance Reference
 
-Phone-call workflows create real-world side effects. This document outlines safety boundaries for the Appointment Backfill Operator.
+⚠️ **IMPORTANT DISCLAIMER**
+
+This document describes best practices and recommendations for deploying appointment backfill workflows. **The current implementation is a reference demo and does not fully implement all recommendations.** Key limitations:
+
+- **This app is NOT HIPAA-ready** — it stores patient data in plaintext SQLite with no encryption at rest, no audit logging, and no consent management system
+- **Calls are fully automatic** — there are no manual approval gates; once triggered, the system immediately begins calling patients from the waitlist
+- **This is not production-ready for live medical appointments** — use only for demos or with fictional test data
+- **For production deployment**, implement all recommendations in this document and conduct a comprehensive security and compliance review with your legal and medical teams
+
+For production use, you must:
+1. Add database encryption at rest
+2. Implement proper consent tracking and management
+3. Add comprehensive audit logging with user attribution
+4. Obtain proper legal review for HIPAA, TCPA, and state-specific compliance
+5. Implement human approval gates if required by your clinic's policies
+6. Set up encryption in transit (HTTPS with certificate pinning)
+
+---
+
+Phone-call workflows create real-world side effects. This document outlines recommended safety boundaries for appointment backfill workflows.
 
 ## Consent & Disclosure
 
@@ -33,13 +52,14 @@ The CALL-E call script should disclose:
 
 ### Data Display
 
-- **Masked in UI** — Phone numbers displayed as `*****7890` (last 4 digits only)
 - **Masked in logs** — Console output masks as `+1***5678`
+- **Masked in UI** — Phone numbers should be displayed as `*****7890` (last 4 digits only) to front-desk staff
 - **Unmasked in database** — Full numbers stored for compliance records
 - **Unmasked in CALL-E** — Full numbers sent to API (required for call)
 
 **Why separate display/storage?**
-- UI is visible to front-desk staff → masked for privacy
+- Logs are visible to developers → masked for privacy
+- UI is visible to front-desk staff → should be masked for privacy
 - Database is compliance record → needs full number for audit
 - CALL-E needs full number → required for actual phone call
 
@@ -173,12 +193,13 @@ for (const entry of waitlist) {
 }
 ```
 
-### Stopping at First Acceptance
+### Stopping at First Acceptance (or on Error)
 
-- As soon as one patient accepts the slot, **stop calling**
+- As soon as one patient **ACCEPTS** the slot, **stop calling**
 - Mark that patient's waitlist entry as `MATCHED`
 - Do not call any remaining patients
 - Return confirmation to clinic staff
+- ⚠️ **IMPORTANT**: On `TIMEOUT`, `NO_ANSWER`, or `FAILED`, **stop cascade and alert staff** — do not auto-advance to next patient
 
 ## Call Failure Modes
 
@@ -188,19 +209,20 @@ for (const entry of waitlist) {
 
 | Outcome | Meaning | Action |
 |---------|---------|--------|
-| `COMPLETED` | Call answered, patient responded | Process result |
-| `NO_ANSWER` | Phone rang, no one answered | Try next patient |
-| `FAILED` | Number invalid, line unreachable | Try next patient |
+| `ACCEPTED` | Patient explicitly confirmed | **STOP cascade** — assign slot |
 | `DECLINED` | Patient explicitly said no | Try next patient |
-| `TIMEOUT` | Call took too long to connect | **Stop cascade** |
+| `COMPLETED` | Call answered, patient responded with ambiguous result | Try next patient |
+| `NO_ANSWER` | Phone rang, no one answered | **STOP cascade** — alert staff |
+| `FAILED` | Number invalid, line unreachable | **STOP cascade** — alert staff |
+| `TIMEOUT` | Call took too long to connect | **STOP cascade** — alert staff |
 
-**Timeout is not a retry signal** — if CALL-E times out, stop and alert clinic staff to review.
+**Timeout/No-Answer/Failed are NOT retry signals** — if any of these occur, stop the cascade and alert clinic staff to review. Do not auto-advance to the next patient.
 
 ```typescript
-if (result.status === "TIMEOUT") {
-  console.error("Call timed out. Stopping cascade.");
-  await notifyClinicStaff("Backfill timeout", { reason: "Call did not complete" });
-  break;  // Stop cascade
+if (result.status === "TIMEOUT" || result.status === "NO_ANSWER" || result.status === "FAILED") {
+  console.error(`Call ${result.status}. Stopping cascade and alerting staff.`);
+  await notifyClinicStaff("Backfill stopped", { reason: result.status, notes: result.notes });
+  break;  // Stop cascade — do not continue
 }
 ```
 

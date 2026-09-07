@@ -4,6 +4,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import { authMiddleware } from './middleware/auth';
 import appointments from './routes/appointments';
 import webhooks from './routes/webhooks';
 import dashboard from './routes/dashboard';
@@ -41,10 +42,11 @@ app.get('/dashboard', (_req: Request, res: Response) => {
   res.sendFile(dashboardFile);
 });
 
-app.use('/api/appointments', appointments);
-app.use('/api/webhooks', webhooks);
-app.use('/api/inbound', inbound);
-app.use('/api/dashboard', dashboard);
+// SECURITY: Apply authentication middleware to all API endpoints
+app.use('/api/appointments', authMiddleware, appointments);
+app.use('/api/webhooks', authMiddleware, webhooks);
+app.use('/api/inbound', authMiddleware, inbound);
+app.use('/api/dashboard', authMiddleware, dashboard);
 
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
