@@ -1,11 +1,15 @@
 import axios from 'axios';
-import { isValidE164, validateE164OrThrow, maskPhoneNumber } from '../utils/phoneValidation';
-import { maskPatientName } from '../utils/piiMasking';
-import { isLiveCallsEnabled, validateCalleBaseUrl } from '../utils/liveCallGate';
+import { validateE164OrThrow } from '../utils/phoneValidation';
+import { maskPhoneNumber, maskSensitiveCallPayload } from '../utils/piiMasking';
+import {
+  assertLiveCallDestinationAuthorized,
+  isLiveCallsEnabled,
+  validateCalleBaseUrl,
+} from '../utils/liveCallGate';
 
 type OutboundResult = {
   accepted: boolean;
-  notes?: string;
+  notes?: string | null;
   response_status: 'ACCEPTED' | 'DECLINED' | 'NO_ANSWER' | 'FAILED';
   calle_call_id?: string;
   raw?: any;
@@ -17,6 +21,11 @@ const asAccepted = (value: any): boolean => {
   return ['yes', 'accepted', 'true', 'accept'].includes(stringValue);
 };
 
+const isAmbiguousAccepted = (value: any): boolean => {
+  const stringValue = String(value ?? '').trim().toLowerCase();
+  return !['yes', 'accepted', 'true', 'accept', 'no', 'declined', 'false', 'decline'].includes(stringValue);
+};
+
 export default class CalleService {
   private client: any | undefined;
   private apiKey: string | undefined;
@@ -26,12 +35,21 @@ export default class CalleService {
     this.client = undefined;
     this.apiKey = process.env.CALLE_API_KEY;
     this.baseUrl = process.env.CALLE_BASE_URL || 'https://api.heycall-e.com';
-    
-    // Validate CALLE_BASE_URL on construction
+
     try {
       validateCalleBaseUrl();
     } catch (error: any) {
-      console.error(`❌ ${error.message}`);
+      console.error(error.message);
+    }
+  }
+
+  private assertLiveRecipientsAuthorized(opts: any): void {
+    const recipients = Array.isArray(opts?.recipients) ? opts.recipients : [];
+    for (const recipient of recipients) {
+      const phones = Array.isArray(recipient?.phones) ? recipient.phones : [];
+      for (const phone of phones) {
+        assertLiveCallDestinationAuthorized(phone);
+      }
     }
   }
 
@@ -40,112 +58,67 @@ export default class CalleService {
       calls: {
         createAndWait: async (opts: any, params?: any) => {
           if (!this.apiKey) throw new Error('No API key configured');
-          
-          // SECURITY GATE 1: Check if live calls are allowed before making actual API call
           if (!isLiveCallsEnabled()) {
-            throw new Error(
-              'Live calls are disabled. Set ALLOW_LIVE_CALLS=true and CALLE_API_KEY in .env to enable. ' +
-              'Currently running in demo/mock mode only.'
-            );
+            throw new Error('Live calls are disabled. Configure ALLOW_LIVE_CALLS, CALLE_API_KEY, CALLE_API_KEY_SOURCE, and ALLOWED_LIVE_RECIPIENTS.');
           }
-          
-          try {
-            console.log(`📞 Calling CALL-E API: POST ${this.baseUrl}/v1/calls`);
-            
-            // Try with Bearer token first
-            const headers: any = {
-              'Authorization': `Bearer ${this.apiKey}`,
-              'Content-Type': 'application/json',
-            };
-            
-            if (params?.idempotencyKey) {
-              headers['Idempotency-Key'] = params.idempotencyKey;
-            }
-            
-            // Step 1: Create the call
-            const createResponse = await axios.post(
-              `${this.baseUrl}/v1/calls`,
-              {
-                task: opts.task,
-                recipients: opts.recipients,
-                // Note: resultSchema is removed - CALL-E API v1 doesn't accept it
-                metadata: opts.metadata || {},
-              },
-              {
-                headers,
-                timeout: 60000,
-              }
-            );
-            
-            const callId = createResponse.data.id || createResponse.data.call_id;
-            if (!callId) {
-              throw new Error('No call ID returned from CALL-E API');
-            }
-            
-            console.log(`   Call created with ID: ${callId}`);
-            
-            // Step 2: Poll for call completion
-            const maxWaitMs = 360_000; // 6 minutes it's timeout for small duration
-            const pollIntervalMs = 5_000; // 5 seconds
-            const startTime = Date.now();
-            
-            let callData: any = null;
-            // eslint-disable-next-line no-constant-condition
-            while (true) {
-              await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-              
-              const getResponse = await axios.get(
-                `${this.baseUrl}/v1/calls/${callId}`,
-                { headers, timeout: 10000 }
-              );
-              
-              callData = getResponse.data;
-              const status = (callData.status || '').toLowerCase();
-              
-              console.log(`   Polling call ${callId}: status = ${status}`);
-              
-              // Terminal states: completed, failed, no_answer, cancelled, canceled
-              if (['completed', 'failed', 'no_answer', 'cancelled', 'canceled'].includes(status)) {
-                break;
-              }
-              
-              // Timeout check
-              if (Date.now() - startTime > maxWaitMs) {
-                console.log(`   Polling timed out after ${maxWaitMs}ms`);
-                break;
-              }
-            }
-            
-            // If we exited the loop due to timeout, callData holds the last known state
-            if (!callData) {
-              // Fallback to the create response if we never got a get response
-              callData = createResponse.data;
-            }
-            
-            return {
-              id: callData.id || callData.call_id || `call-${Date.now()}`,
-              status: callData.status || 'completed',
-              summary: callData.summary || callData.message,
-              structuredResult: callData.structuredResult || { accepted: callData.accepted },
-              recipients: callData.recipients || [{ structuredResult: callData.structuredResult }],
-              taskCompleted: callData.taskCompleted,
-            };
-          } catch (error: any) {
-            const status = error.response?.status;
-            const errorData = error.response?.data;
-            const errorMsg = errorData?.error || errorData?.message || error.message;
-            
-            console.error('❌ CALL-E HTTP API error:');
-            console.error(`   Status: ${status}`);
-            console.error(`   Message: ${errorMsg}`);
-            console.error(`   Full response:`, JSON.stringify(errorData, null, 2));
-            
-            if (status === 401) {
-              console.error('   💡 Hint: Check that your API key is valid and in the correct format');
-            }
-            
-            throw error;
+          this.assertLiveRecipientsAuthorized(opts);
+
+          const headers: any = {
+            Authorization: `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+          };
+
+          if (params?.idempotencyKey) {
+            headers['Idempotency-Key'] = params.idempotencyKey;
           }
+
+          const createResponse = await axios.post(
+            `${this.baseUrl}/v1/calls`,
+            {
+              task: opts.task,
+              recipients: opts.recipients,
+              metadata: maskSensitiveCallPayload(opts.metadata || {}),
+            },
+            { headers, timeout: 60000 }
+          );
+
+          const callId = createResponse.data.id || createResponse.data.call_id;
+          if (!callId) {
+            throw new Error('No call ID returned from CALL-E API');
+          }
+
+          const maxWaitMs = 360_000;
+          const pollIntervalMs = 5_000;
+          const startTime = Date.now();
+          let callData: any = null;
+
+          while (true) {
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+            const getResponse = await axios.get(`${this.baseUrl}/v1/calls/${callId}`, { headers, timeout: 10000 });
+            callData = getResponse.data;
+            const status = (callData.status || '').toLowerCase();
+
+            if (['completed', 'failed', 'no_answer', 'cancelled', 'canceled'].includes(status)) {
+              break;
+            }
+
+            if (Date.now() - startTime > maxWaitMs) {
+              break;
+            }
+          }
+
+          if (!callData) {
+            callData = createResponse.data;
+          }
+
+          return {
+            id: callData.id || callData.call_id || `call-${Date.now()}`,
+            status: callData.status || 'completed',
+            summary: callData.summary || callData.message,
+            structuredResult: callData.structuredResult || { accepted: callData.accepted },
+            recipients: callData.recipients || [{ structuredResult: callData.structuredResult }],
+            taskCompleted: callData.taskCompleted,
+          };
         },
       },
     };
@@ -163,7 +136,7 @@ export default class CalleService {
             summary: accepted ? 'Simulated patient accepted the earlier slot.' : 'Simulated patient declined or did not answer.',
             structuredResult: { accepted: accepted ? 'yes' : 'no' },
             recipients: [{ structuredResult: { accepted: accepted ? 'yes' : 'no' } }],
-            metadata: { source: 'OpenSlot AI mock flow', target_phone: _opts?.recipients?.[0]?.phones?.[0] || 'unknown' },
+            metadata: { source: 'OpenSlot AI mock flow', target_phone: maskPhoneNumber(_opts?.recipients?.[0]?.phones?.[0] || '') },
           };
         },
       },
@@ -173,131 +146,59 @@ export default class CalleService {
   private async getClient(): Promise<any> {
     if (this.client) return this.client;
 
-    if (!this.apiKey) {
-      console.log('✓ No CALLE_API_KEY configured; using local mock CALL-E client for the demo flow.');
-      this.client = this.getMockClient();
-      return this.client;
-    }
-
-    // SECURITY GATE 2: Check if live calls are actually enabled before trying to use real API
-    if (!isLiveCallsEnabled()) {
-      console.log('ℹ️  ALLOW_LIVE_CALLS is disabled; using local mock CALL-E client.');
-      console.log('   To enable live calls, set ALLOW_LIVE_CALLS=true in .env');
+    if (!this.apiKey || !isLiveCallsEnabled()) {
+      console.log('Using local mock CALL-E client for the reference demo flow.');
       this.client = this.getMockClient();
       return this.client;
     }
 
     try {
-      console.log('🔄 Attempting to load CALL-E SDK with API key...');
-      
-      // Try to use the SDK directly
       const mod = await import('@call-e/calle');
       const CalleClient = mod.CalleClient;
-      
+
       if (!CalleClient) {
         throw new Error('CalleClient not found in module');
       }
-      
+
       this.client = new CalleClient({ apiKey: this.apiKey, baseUrl: this.baseUrl });
-      console.log('✓ CALL-E SDK loaded successfully');
       return this.client;
     } catch (error: any) {
-      console.warn('⚠ CALL-E SDK import failed, trying HTTP API fallback:', error.message);
-      
-      try {
-        console.log('🔄 Attempting CALL-E HTTP API...');
-        this.client = this.getHTTPClient();
-        console.log('✓ Using CALL-E HTTP API directly');
-        return this.client;
-      } catch (fallbackError: any) {
-        console.error('⚠ CALL-E HTTP API also failed, using mock client:', fallbackError.message);
-        this.client = this.getMockClient();
-        return this.client;
-      }
+      console.warn('CALL-E SDK import failed, trying HTTP API fallback:', error.message);
+      this.client = this.getHTTPClient();
+      return this.client;
     }
   }
 
   async makeOutboundCall(phone: string, task: string): Promise<OutboundResult> {
-    const client = await this.getClient();
-    if (!client) {
-      return { accepted: false, response_status: 'FAILED', notes: 'CALL-E client unavailable' };
-    }
-
     try {
-      const call = await client.calls.createAndWait(
-        {
-          task,
-          recipients: [{ phones: [phone], region: 'IN', locale: 'en-IN' }],
-          resultSchema: {
-            type: 'object',
-            required: ['accepted'],
-            properties: {
-              accepted: { type: 'string', enum: ['yes', 'no', 'unknown'] },
-            },
-          },
-          metadata: { source: 'OpenSlot AI automated flow', target_phone: phone },
-        },
-        { idempotencyKey: `openslot-${Date.now()}-${phone.replace(/\D/g, '')}` },
-      );
-
-      const rawAccepted =
-        call?.structuredResult?.accepted ??
-        call?.recipients?.[0]?.structuredResult?.accepted ??
-        call?.taskCompleted ??
-        'no';
-
-      const accepted = asAccepted(rawAccepted);
-
-      const resultStatus =
-        call?.status === 'completed'
-          ? accepted
-            ? 'ACCEPTED'
-            : 'DECLINED'
-          : call?.status === 'failed'
-            ? 'FAILED'
-            : 'NO_ANSWER';
-
-      return {
-        accepted,
-        notes: call?.summary || call?.failureMessage || 'Outbound CALL-E call completed',
-        response_status: resultStatus,
-        calle_call_id: call?.id,
-        raw: call,
-      };
+      const validatedPhone = validateE164OrThrow(phone, 'Destination phone number');
+      if (isLiveCallsEnabled()) {
+        assertLiveCallDestinationAuthorized(validatedPhone);
+      }
+      return this.placeCallAndWaitForResult(validatedPhone, task);
     } catch (error: any) {
       return {
         accepted: false,
         response_status: 'FAILED',
-        notes: error?.message || 'CALLE outbound call failed',
+        notes: error?.message || 'CALL-E outbound call failed',
       };
     }
   }
 
   async createReminderCall(phone: string, patientName: string, appointmentTime: Date, providerName: string): Promise<OutboundResult> {
-    const reminderTask = `Call ${phone} and speak to ${patientName}. This is a reminder from ${providerName}'s clinic. Tell them their appointment is scheduled for ${appointmentTime.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}. Ask them to confirm that they can make the visit. If they confirm, politely thank them and end the call. If they decline or do not answer, end politely and note that the clinic will follow up.`;
+    const reminderTask = `Call the authorized patient destination and speak to ${patientName}. This is a reminder from ${providerName}'s clinic. Tell them their appointment is scheduled for ${appointmentTime.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}. Ask them to confirm that they can make the visit. If they confirm, politely thank them and end the call. If they decline or do not answer, end politely and note that the clinic will follow up.`;
 
     return this.makeOutboundCall(phone, reminderTask);
   }
 
-  /**
-   * Initiate a CALL-E outbound call and poll the call until it terminates.
-   * 
-   * SECURITY & SAFETY GATES:
-   * - Validates phone number is E.164 format
-   * - Checks ALLOW_LIVE_CALLS gate before making actual API calls
-   * - Masks patient phone numbers in logs
-   * - Returns immediately on timeout, no-answer, or ambiguous results (no auto-advance)
-   * 
-   * Returns only when the call is no longer in an in-progress state, so the
-   * caller gets the agent's actual final structured result instead of a
-   * premature "not accepted" guess.
-   */
   async placeCallAndWaitForResult(phone: string, task: string, opts: { maxWaitMs?: number; pollIntervalMs?: number } = {}): Promise<OutboundResult> {
-    // SECURITY GATE 3: Validate E.164 phone format before any call attempt
+    let validatedPhone: string;
     try {
-      validateE164OrThrow(phone, 'Destination phone number');
+      validatedPhone = validateE164OrThrow(phone, 'Destination phone number');
+      if (isLiveCallsEnabled()) {
+        assertLiveCallDestinationAuthorized(validatedPhone);
+      }
     } catch (error: any) {
-      console.error(`❌ Call rejected: ${error.message}`);
       return {
         accepted: false,
         response_status: 'FAILED',
@@ -307,52 +208,48 @@ export default class CalleService {
 
     const maxWaitMs = opts.maxWaitMs ?? 120_000;
     const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
-    const maskedPhone = maskPhoneNumber(phone);
-
+    const maskedPhone = maskPhoneNumber(validatedPhone);
     const client = await this.getClient();
+
     if (!client) {
       return { accepted: false, response_status: 'FAILED', notes: 'CALL-E client unavailable' };
     }
 
-    const idemKey = `openslot-${Date.now()}-${phone.replace(/\D/g, '')}`;
-
+    const idemKey = `openslot-${Date.now()}-${validatedPhone.slice(-4)}`;
     let call: any;
+
     try {
-      console.log(`📱 Placing outbound call to ${maskedPhone}`);
-      
-      // Preferred path: SDK supports `createAndWait` which itself blocks until
-      // the call finishes. The orchestrator will wait on this promise.
+      console.log(`Placing outbound call to ${maskedPhone}`);
+
       if (typeof client.calls?.createAndWait === 'function') {
         call = await client.calls.createAndWait(
           {
             task,
-            recipients: [{ phones: [phone], region: 'IN', locale: 'en-IN' }],
+            recipients: [{ phones: [validatedPhone], region: 'IN', locale: 'en-IN' }],
             resultSchema: {
               type: 'object',
               required: ['accepted'],
               properties: { accepted: { type: 'string', enum: ['yes', 'no', 'unknown'] } },
             },
-            metadata: { source: 'Clinic appointment backfill', target_phone_last4: phone.slice(-4) },
+            metadata: { source: 'Clinic appointment backfill', target_phone: maskedPhone },
           },
-          { idempotencyKey: idemKey },
+          { idempotencyKey: idemKey }
         );
       } else if (typeof client.calls?.create === 'function') {
-        // Fallback: create then poll. Useful for HTTP-only clients.
         const created = await client.calls.create(
           {
             task,
-            recipients: [{ phones: [phone], region: 'IN', locale: 'en-IN' }],
-            metadata: { source: 'Clinic appointment backfill', target_phone_last4: phone.slice(-4) },
+            recipients: [{ phones: [validatedPhone], region: 'IN', locale: 'en-IN' }],
+            metadata: { source: 'Clinic appointment backfill', target_phone: maskedPhone },
           },
-          { idempotencyKey: idemKey },
+          { idempotencyKey: idemKey }
         );
         const callId = created?.id || created?.call_id;
         const started = Date.now();
-        // eslint-disable-next-line no-constant-condition
+
         while (true) {
           await new Promise((r) => setTimeout(r, pollIntervalMs));
           if (Date.now() - started > maxWaitMs) {
-            console.log(`⏱️  Call to ${maskedPhone} timed out after ${maxWaitMs}ms - no auto-advance`);
             return { accepted: false, response_status: 'NO_ANSWER', notes: 'Call timed out; no auto-advance to next patient', calle_call_id: callId };
           }
           const fetched = await client.calls.retrieve?.(callId);
@@ -373,7 +270,17 @@ export default class CalleService {
       call?.structuredResult?.accepted ??
       call?.recipients?.[0]?.structuredResult?.accepted ??
       call?.taskCompleted ??
-      'no';
+      'unknown';
+
+    if (isAmbiguousAccepted(rawAccepted)) {
+      return {
+        accepted: false,
+        response_status: 'FAILED',
+        notes: 'Ambiguous call result; manual review required before booking or rescheduling.',
+        calle_call_id: call?.id,
+        raw: maskSensitiveCallPayload(call),
+      };
+    }
 
     const accepted = asAccepted(rawAccepted);
     const status = (call?.status || '').toLowerCase();
@@ -382,26 +289,40 @@ export default class CalleService {
       : status === 'failed' ? 'FAILED'
       : 'NO_ANSWER';
 
-    console.log(`✓ Call to ${maskedPhone}: ${response_status} (accepted: ${accepted})`);
+    console.log(`Call to ${maskedPhone}: ${response_status} (accepted: ${accepted})`);
 
     return {
       accepted,
       notes: call?.summary || call?.recipients?.[0]?.summary || 'Call completed',
       response_status,
       calle_call_id: call?.id,
-      raw: call,
+      raw: maskSensitiveCallPayload(call),
     };
   }
 
   parseWebhook(body: any): OutboundResult {
     if (!body) return { accepted: false, response_status: 'FAILED' };
-    const accepted = asAccepted(body.accepted ?? body.structured_output?.accepted ?? body.response_status === 'ACCEPTED');
+    const rawAccepted = body.accepted ?? body.structured_output?.accepted ?? body.structuredResult?.accepted;
+
+    if (isAmbiguousAccepted(rawAccepted)) {
+      return {
+        accepted: false,
+        notes: 'Ambiguous call result; manual review required before booking or rescheduling.',
+        response_status: 'FAILED',
+        calle_call_id: body.call_id || body.calle_call_id || body.id,
+        raw: maskSensitiveCallPayload(body),
+      };
+    }
+
+    const accepted = asAccepted(rawAccepted);
+    const responseStatus = body.response_status || (accepted ? 'ACCEPTED' : 'DECLINED');
+
     return {
       accepted,
       notes: body.notes || body.summary || null,
-      response_status: body.response_status || 'FAILED',
+      response_status: responseStatus,
       calle_call_id: body.call_id || body.calle_call_id || body.id,
-      raw: body,
+      raw: maskSensitiveCallPayload(body),
     };
   }
 }

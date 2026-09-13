@@ -8,7 +8,19 @@ const router = Router();
 const calle = new CalleService();
 const orchestrator = new BackfillOrchestrator(calle);
 
-// POST /mock endpoint for simulating inbound cancellations (requires auth)
+async function verifyAppointmentPatient(appointmentId: string, patientId: string) {
+  const appointment = await prisma.appointment.findUnique({
+    where: { id: appointmentId },
+    include: { patient: true },
+  });
+
+  if (!appointment) return { error: 'appointment not found' as const };
+  if (!appointment.patient_id || appointment.patient_id !== patientId) {
+    return { error: 'selected patient does not match appointment' as const };
+  }
+  return { appointment };
+}
+
 router.post('/mock', requireAuth, async (req: Request, res: Response) => {
   try {
     const { appointment_id, patient_id, action, reason } = req.body as {
@@ -18,38 +30,18 @@ router.post('/mock', requireAuth, async (req: Request, res: Response) => {
       reason?: string;
     };
 
-    if (!appointment_id || action !== 'CANCEL') {
-      return res.status(400).json({ error: 'invalid payload: appointment_id and action=CANCEL are required' });
+    if (!appointment_id || !patient_id || action !== 'CANCEL') {
+      return res.status(400).json({ error: 'invalid payload: appointment_id, patient_id, and action=CANCEL are required' });
     }
 
-    let patient = null as Awaited<ReturnType<typeof prisma.patient.findUnique>>;
-    if (patient_id) {
-      patient = await prisma.patient.findUnique({ where: { id: patient_id } });
-    }
-
-    if (!patient) {
-      const appointment = await prisma.appointment.findUnique({
-        where: { id: appointment_id },
-        include: { patient: true },
-      });
-      patient = appointment?.patient ?? null;
-    }
-
+    const patient = await prisma.patient.findUnique({ where: { id: patient_id } });
     if (!patient) {
       return res.status(404).json({ error: 'patient not found' });
     }
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id: appointment_id },
-      include: { patient: true },
-    });
-
-    if (!appointment) {
-      return res.status(404).json({ error: 'appointment not found' });
-    }
-
-    if (appointment.patient_id && appointment.patient_id !== patient.id) {
-      return res.status(401).json({ error: 'selected patient does not match appointment' });
+    const verified = await verifyAppointmentPatient(appointment_id, patient_id);
+    if ('error' in verified) {
+      return res.status(verified.error === 'appointment not found' ? 404 : 409).json({ error: verified.error });
     }
 
     await prisma.appointment.update({
@@ -59,7 +51,7 @@ router.post('/mock', requireAuth, async (req: Request, res: Response) => {
 
     await prisma.callLog.create({
       data: {
-        calle_call_id: `mock-inbound-${appointment_id}`,
+        calle_call_id: `mock-inbound-${appointment_id}-${Date.now()}`,
         direction: 'INBOUND',
         patient_id: patient.id,
         status: 'COMPLETED',
@@ -91,7 +83,6 @@ router.post('/mock', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// POST /call-completed endpoint (requires auth)
 router.post('/call-completed', requireAuth, async (req: Request, res: Response) => {
   try {
     const { patient_id, appointment_id, action, reason } = req.body as {
@@ -102,7 +93,12 @@ router.post('/call-completed', requireAuth, async (req: Request, res: Response) 
     };
 
     if (!appointment_id || !patient_id || action !== 'CANCEL') {
-      return res.status(400).json({ error: 'invalid payload' });
+      return res.status(400).json({ error: 'invalid payload: appointment_id, patient_id, and action=CANCEL are required' });
+    }
+
+    const verified = await verifyAppointmentPatient(appointment_id, patient_id);
+    if ('error' in verified) {
+      return res.status(verified.error === 'appointment not found' ? 404 : 409).json({ error: verified.error });
     }
 
     await prisma.appointment.update({
@@ -112,12 +108,12 @@ router.post('/call-completed', requireAuth, async (req: Request, res: Response) 
 
     await prisma.callLog.create({
       data: {
-        calle_call_id: `inbound-${appointment_id}`,
+        calle_call_id: `inbound-${appointment_id}-${Date.now()}`,
         direction: 'INBOUND',
         patient_id,
         status: 'COMPLETED',
         transcript_summary: reason || 'Inbound completion handled',
-        structured_output: JSON.stringify({ action, appointment_id, patient_id, reason }),
+        structured_output: JSON.stringify({ action, appointment_id, patient_id, reason, verified: true }),
       },
     });
 

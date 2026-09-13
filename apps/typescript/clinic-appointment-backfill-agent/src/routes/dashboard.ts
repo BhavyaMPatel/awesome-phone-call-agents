@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../prismaClient';
+import { maskPhoneNumber } from '../utils/piiMasking';
 
 const router = Router();
 
-// GET /stats endpoint (read-only, auth required)
 router.get('/stats', async (_req: Request, res: Response) => {
   try {
     const [booked, cancelled, waiting, totalPatients, appointments, queue, recentCalls, patients] = await Promise.all([
@@ -42,7 +42,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
         id: patient.id,
         first_name: patient.first_name,
         last_name: patient.last_name,
-        phone_number: patient.phone_number,
+        phone_number: maskPhoneNumber(patient.phone_number),
         label: `${patient.first_name} ${patient.last_name}`,
       })),
       appointments: appointments.map((entry) => ({
@@ -60,7 +60,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
         priority_score: entry.priority_score,
         preferred_department: entry.preferred_department,
         status: entry.status,
-        phone_number: entry.patient.phone_number,
+        phone_number: maskPhoneNumber(entry.patient.phone_number),
       })),
       recent_calls: recentCalls.map((call) => ({
         id: call.id,

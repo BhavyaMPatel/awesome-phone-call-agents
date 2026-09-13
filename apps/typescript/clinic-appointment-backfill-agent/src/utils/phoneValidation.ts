@@ -41,7 +41,7 @@ export function validateE164OrThrow(phoneNumber: unknown, context: string = 'Pho
  * @returns Last 4 digits with preceding * for privacy
  */
 export function getPhoneRefSuffix(phoneNumber: string): string {
-  if (phoneNumber.length < 4) {
+  if (!phoneNumber || phoneNumber.length <= 4) {
     return '****';
   }
   return phoneNumber.slice(-4);
