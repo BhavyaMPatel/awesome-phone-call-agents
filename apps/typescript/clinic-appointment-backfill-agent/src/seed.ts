@@ -14,7 +14,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Aarav',
         last_name: 'Sharma',
-        phone_number: '+1555555101',
+        phone_number: '+15555550101',
         date_of_birth: new Date('1991-05-18T00:00:00.000Z'),
         email: 'aarav.sharma@example.com',
       },
@@ -23,7 +23,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Priya',
         last_name: 'Nair',
-        phone_number: '+1555555102',
+        phone_number: '+15555550102',
         date_of_birth: new Date('1986-11-02T00:00:00.000Z'),
         email: 'priya.nair@example.com',
       },
@@ -32,7 +32,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Rohan',
         last_name: 'Patel',
-        phone_number: '+1555555103',
+        phone_number: '+15555550103',
         date_of_birth: new Date('1979-08-21T00:00:00.000Z'),
         email: 'rohan.patel@example.com',
       },
@@ -41,7 +41,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Meera',
         last_name: 'Iyer',
-        phone_number: '+1555555103',
+        phone_number: '+15555550104',
         date_of_birth: new Date('1994-02-14T00:00:00.000Z'),
         email: 'meera.iyer@example.com',
       },
@@ -50,7 +50,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Kabir',
         last_name: 'Singh',
-        phone_number: '+1555555104',
+        phone_number: '+15555550105',
         date_of_birth: new Date('1982-09-28T00:00:00.000Z'),
         email: 'kabir.singh@example.com',
       },
@@ -115,7 +115,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Ananya',
         last_name: 'Verma',
-        phone_number: '+1555555105',
+        phone_number: '+15555550106',
         date_of_birth: new Date('1995-03-22T00:00:00.000Z'),
         email: 'ananya.verma@example.com',
       },
@@ -124,7 +124,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Rahul',
         last_name: 'Joshi',
-        phone_number: '+1555555106',
+        phone_number: '+15555550107',
         date_of_birth: new Date('1988-07-10T00:00:00.000Z'),
         email: 'rahul.joshi@example.com',
       },
@@ -133,7 +133,7 @@ export async function ensureSeedData() {
       data: {
         first_name: 'Sneha',
         last_name: 'Gupta',
-        phone_number: '+1555555107',
+        phone_number: '+15555550108',
         date_of_birth: new Date('1992-11-05T00:00:00.000Z'),
         email: 'sneha.gupta@example.com',
       },
